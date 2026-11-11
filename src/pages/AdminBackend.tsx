@@ -50,6 +50,8 @@ export default function AdminBackend({ onGoStudent }: Props) {
   const [catFilter, setCatFilter] = useState<string>('ALL');
   const [exams, setExams] = useState<ExamCatalogRow[]>([]);
   const [pinMap, setPinMap] = useState<Record<string, string>>({});
+  const [attemptsDraft, setAttemptsDraft] = useState<Record<string, number>>({});
+  const [customAttemptsMap, setCustomAttemptsMap] = useState<Record<string, boolean>>({});
   const [scores, setScores] = useState<ScoreRow[]>([]);
   const [activeSessions, setActiveSessions] = useState<SessionMonitorRow[]>([]);
   const [bankRows, setBankRows] = useState<QuestionBankRow[]>([]);
@@ -93,7 +95,20 @@ export default function AdminBackend({ onGoStudent }: Props) {
         .order('started_at', { ascending: false }),
     ]);
 
-    if (exRes.data) setExams(exRes.data as ExamCatalogRow[]);
+    if (exRes.data) {
+      const exList = exRes.data as ExamCatalogRow[];
+      setExams(exList);
+      const nextDraft: Record<string, number> = {};
+      const nextCustom: Record<string, boolean> = {};
+      const presets = new Set([0, 1, 2, 3, 4, 5, 6, 11]);
+      for (const ex of exList) {
+        const val = typeof ex.max_attempts === 'number' ? ex.max_attempts : ex.allow_retake ? 0 : 1;
+        nextDraft[ex.id] = val;
+        if (!presets.has(val)) nextCustom[ex.id] = true;
+      }
+      setAttemptsDraft(nextDraft);
+      setCustomAttemptsMap(nextCustom);
+    }
     if (secRes.data) {
       const pm: Record<string, string> = {};
       for (const r of secRes.data) pm[r.exam_id] = r.require_pin || '';
@@ -199,8 +214,11 @@ export default function AdminBackend({ onGoStudent }: Props) {
     const pinEl = document.getElementById(`pin-${ex.id}`) as HTMLInputElement | null;
     const rqEl = document.getElementById(`rq-${ex.id}`) as HTMLInputElement | null;
     const rcEl = document.getElementById(`rc-${ex.id}`) as HTMLInputElement | null;
-    const rtEl = document.getElementById(`rt-${ex.id}`) as HTMLInputElement | null;
     const rvEl = document.getElementById(`rv-${ex.id}`) as HTMLInputElement | null;
+
+    const rawMaxAttempts =
+      attemptsDraft[ex.id] ?? (typeof ex.max_attempts === 'number' ? ex.max_attempts : ex.allow_retake ? 0 : 1);
+    const maxAttempts = Math.max(0, Math.min(99, Math.trunc(Number(rawMaxAttempts))));
 
     const roomsArr = (roomsEl?.value || 'ทั้งหมด')
       .split(',')
@@ -215,7 +233,8 @@ export default function AdminBackend({ onGoStudent }: Props) {
         approved_rooms: roomsArr.length ? roomsArr : ['ทั้งหมด'],
         random_questions: Boolean(rqEl?.checked),
         random_choices: Boolean(rcEl?.checked),
-        allow_retake: Boolean(rtEl?.checked),
+        allow_retake: maxAttempts !== 1,
+        max_attempts: maxAttempts,
         show_review: Boolean(rvEl?.checked),
         updated_at: new Date().toISOString(),
       })
@@ -441,10 +460,11 @@ WHERE email = '${teacherEmail}';`}
                         <th>ชุดสอบ / ตัวชี้วัด</th>
                         <th style={{ width: 65 }}>ข้อสอบ</th>
                         <th style={{ width: 65 }}>เวลา(น.)</th>
-                        <th style={{ width: 120 }}>ห้องที่เข้าสอบ</th>
-                        <th style={{ width: 90 }}>PIN เข้าสอบ</th>
-                        <th style={{ width: 170 }}>ตั้งค่าสุ่ม & เฉลย</th>
-                        <th style={{ width: 110 }}>บันทึก</th>
+                        <th style={{ width: 175 }}>ทดสอบซ้ำ (จำนวนครั้ง)</th>
+                        <th style={{ width: 115 }}>ห้องที่เข้าสอบ</th>
+                        <th style={{ width: 85 }}>PIN เข้าสอบ</th>
+                        <th style={{ width: 135 }}>ตั้งค่าสุ่ม & เฉลย</th>
+                        <th style={{ width: 100 }}>บันทึก</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -481,12 +501,70 @@ WHERE email = '${teacherEmail}';`}
                           </td>
                           <td><input id={`qcnt-${ex.id}`} type="number" className="input" defaultValue={ex.question_count} min={1} max={40} style={{ padding: '4px 6px' }} /></td>
                           <td><input id={`time-${ex.id}`} type="number" className="input" defaultValue={ex.time_limit_min} min={1} max={180} style={{ padding: '4px 6px' }} /></td>
+                          <td>
+                            {(() => {
+                              const currentVal = attemptsDraft[ex.id] ?? (typeof ex.max_attempts === 'number' ? ex.max_attempts : ex.allow_retake ? 0 : 1);
+                              const presetNums = [0, 1, 2, 3, 4, 5, 6, 11];
+                              const isCustom = Boolean(customAttemptsMap[ex.id]) || !presetNums.includes(currentVal);
+                              const retakeVal = Math.max(0, currentVal > 0 ? currentVal - 1 : 0);
+                              return (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                  <select
+                                    id={`retake-select-${ex.id}`}
+                                    className="input"
+                                    style={{ padding: '4px 6px', fontSize: 12 }}
+                                    value={isCustom ? 'custom' : String(currentVal)}
+                                    onChange={(e) => {
+                                      if (e.target.value === 'custom') {
+                                        setCustomAttemptsMap((prev) => ({ ...prev, [ex.id]: true }));
+                                        if (currentVal <= 1) {
+                                          setAttemptsDraft((prev) => ({ ...prev, [ex.id]: 2 }));
+                                        }
+                                      } else {
+                                        const picked = Number(e.target.value);
+                                        setCustomAttemptsMap((prev) => ({ ...prev, [ex.id]: false }));
+                                        setAttemptsDraft((prev) => ({ ...prev, [ex.id]: picked }));
+                                      }
+                                    }}
+                                  >
+                                    <option value="1">ไม่ให้สอบซ้ำ (รวม 1 ครั้ง)</option>
+                                    <option value="2">ซ้ำได้ 1 ครั้ง (รวม 2 ครั้ง)</option>
+                                    <option value="3">ซ้ำได้ 2 ครั้ง (รวม 3 ครั้ง)</option>
+                                    <option value="4">ซ้ำได้ 3 ครั้ง (รวม 4 ครั้ง)</option>
+                                    <option value="5">ซ้ำได้ 4 ครั้ง (รวม 5 ครั้ง)</option>
+                                    <option value="6">ซ้ำได้ 5 ครั้ง (รวม 6 ครั้ง)</option>
+                                    <option value="11">ซ้ำได้ 10 ครั้ง (รวม 11 ครั้ง)</option>
+                                    <option value="0">ซ้ำได้ไม่จำกัด (∞)</option>
+                                    <option value="custom">กำหนดจำนวนซ้ำเอง...</option>
+                                  </select>
+                                  {isCustom && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                                      <span>ซ้ำได้</span>
+                                      <input
+                                        id={`retake-custom-${ex.id}`}
+                                        type="number"
+                                        className="input"
+                                        min={0}
+                                        max={98}
+                                        value={retakeVal}
+                                        onChange={(e) => {
+                                          const k = Math.max(0, Math.min(98, Math.trunc(Number(e.target.value) || 0)));
+                                          setAttemptsDraft((prev) => ({ ...prev, [ex.id]: k + 1 }));
+                                        }}
+                                        style={{ padding: '2px 5px', width: 54, fontSize: 12 }}
+                                      />
+                                      <span style={{ color: 'var(--muted)' }}>ครั้ง (รวม {retakeVal + 1})</span>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
+                          </td>
                           <td><input id={`rooms-${ex.id}`} type="text" className="input" defaultValue={ex.approved_rooms.join(', ')} style={{ padding: '4px 6px', fontSize: 13 }} /></td>
                           <td><input id={`pin-${ex.id}`} type="text" className="input" defaultValue={pinMap[ex.id] || ''} placeholder="ว่าง=ไม่ใช้" style={{ padding: '4px 6px', fontSize: 13 }} /></td>
                           <td style={{ fontSize: 12 }}>
-                            <label><input id={`rq-${ex.id}`} type="checkbox" defaultChecked={ex.random_questions} /> สุ่มข้อ </label>
+                            <label><input id={`rq-${ex.id}`} type="checkbox" defaultChecked={ex.random_questions} /> สุ่มข้อ</label><br />
                             <label><input id={`rc-${ex.id}`} type="checkbox" defaultChecked={ex.random_choices} /> สุ่มช้อยส์</label><br />
-                            <label><input id={`rt-${ex.id}`} type="checkbox" defaultChecked={ex.allow_retake} /> สอบซ้ำ </label>
                             <label><input id={`rv-${ex.id}`} type="checkbox" defaultChecked={ex.show_review} /> แสดงเฉลย</label>
                           </td>
                           <td>

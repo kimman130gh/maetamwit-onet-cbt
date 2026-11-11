@@ -455,7 +455,19 @@ export default function StudentPortal({ onGoAdmin }: Props) {
 
             <div className="exam-grid" style={{ marginTop: 16 }}>
               {filteredExams.map((ex) => {
-                const lockedDone = Boolean(ex.already_submitted && !ex.allow_retake);
+                const maxAttempts =
+                  typeof ex.max_attempts === 'number' ? ex.max_attempts : ex.allow_retake ? 0 : 1;
+                const usedAttempts = ex.attempts_used ?? (ex.already_submitted ? 1 : 0);
+                const limitReached =
+                  typeof ex.limit_reached === 'boolean'
+                    ? ex.limit_reached
+                    : maxAttempts > 0 && usedAttempts >= maxAttempts;
+                const attemptPolicyLabel =
+                  maxAttempts === 0
+                    ? `ทดสอบซ้ำได้ไม่จำกัด${usedAttempts > 0 ? ` (ทำแล้ว ${usedAttempts} ครั้ง)` : ''}`
+                    : maxAttempts === 1
+                    ? 'ทำได้ 1 ครั้ง (ห้ามสอบซ้ำ)'
+                    : `ซ้ำได้ ${maxAttempts - 1} ครั้ง (รวม ${maxAttempts} ครั้ง • ใช้สิทธิ์ ${usedAttempts}/${maxAttempts})`;
                 return (
                   <div key={ex.id} className="exam-card">
                     <div>
@@ -481,20 +493,33 @@ export default function StudentPortal({ onGoAdmin }: Props) {
                       <p style={{ fontSize: 12, color: '#475569', marginTop: 4 }}>
                         ตัวชี้วัด: {ex.indicators} | ห้อง: {ex.approved_rooms.join(', ')}
                       </p>
+                      <p style={{ fontSize: 12, color: maxAttempts === 1 ? '#64748b' : '#0f766e', fontWeight: 600, marginTop: 4 }}>
+                        🔁 {attemptPolicyLabel}
+                      </p>
                       {ex.previous_result && (
                         <div style={{ marginTop: 8, padding: '6px 10px', background: '#f0fdf4', color: '#166534', borderRadius: 8, fontSize: 13, fontWeight: 600 }}>
                           <CheckCircle2 size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                          ส่งแล้ว: {ex.previous_result.score}/{ex.previous_result.max_score} ({ex.previous_result.percentage}%)
+                          ผลล่าสุด: {ex.previous_result.score}/{ex.previous_result.max_score} ({ex.previous_result.percentage}%)
                         </div>
                       )}
                     </div>
                     <button
-                      className={`btn ${lockedDone ? 'btn-secondary' : 'btn-primary'}`}
+                      className={`btn ${limitReached ? 'btn-secondary' : 'btn-primary'}`}
                       style={{ width: '100%', marginTop: 14 }}
-                      disabled={lockedDone || loadingLobby}
+                      disabled={limitReached || loadingLobby}
                       onClick={() => handleClickStart(ex)}
                     >
-                      {lockedDone ? 'ส่งคำตอบเรียบร้อยแล้ว' : ex.has_pin ? '🔐 ใส่ PIN เพื่อเริ่มสอบ' : '▶ เริ่มทำแบบทดสอบ'}
+                      {limitReached
+                        ? maxAttempts === 1
+                          ? 'ส่งคำตอบเรียบร้อยแล้ว (ทำได้ 1 ครั้ง)'
+                          : `ครบกำหนดจำนวนครั้งแล้ว (${usedAttempts}/${maxAttempts})`
+                        : usedAttempts > 0
+                        ? ex.has_pin
+                          ? `🔐 ใส่ PIN ทดสอบซ้ำ (ครั้งที่ ${usedAttempts + 1}${maxAttempts > 0 ? `/${maxAttempts}` : ''})`
+                          : `🔁 ทดสอบซ้ำ (ครั้งที่ ${usedAttempts + 1}${maxAttempts > 0 ? `/${maxAttempts}` : ''})`
+                        : ex.has_pin
+                        ? '🔐 ใส่ PIN เพื่อเริ่มสอบ'
+                        : '▶ เริ่มทำแบบทดสอบ'}
                     </button>
                   </div>
                 );

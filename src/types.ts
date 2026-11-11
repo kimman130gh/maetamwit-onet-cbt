@@ -10,12 +10,16 @@ export interface ExamCatalogRow {
   random_questions: boolean;
   random_choices: boolean;
   allow_retake: boolean;
+  max_attempts: number; // 1 = ทำได้ 1 ครั้ง (ห้ามซ้ำ), 2+ = ทำซ้ำได้ (max_attempts - 1) ครั้ง, 0 = ไม่จำกัด
   show_review: boolean;
   has_pin: boolean;
   approved: boolean;
   approved_rooms: string[];
   updated_at: string;
   already_submitted?: boolean;
+  attempts_used?: number;
+  attempts_remaining?: number | null;
+  limit_reached?: boolean;
   previous_result?: {
     score: number;
     max_score: number;

@@ -66,6 +66,13 @@ function roomAllowed(approvedRooms: string[] | null, studentRoom: string): boole
   return approvedRooms.some((r) => r.trim() === studentRoom.trim());
 }
 
+function getEffectiveMaxAttempts(exam: { max_attempts?: number | null; allow_retake?: boolean | null }): number {
+  if (typeof exam.max_attempts === 'number' && Number.isFinite(exam.max_attempts) && exam.max_attempts >= 0) {
+    return Math.trunc(exam.max_attempts);
+  }
+  return exam.allow_retake ? 0 : 1;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -100,7 +107,7 @@ Deno.serve(async (req: Request) => {
 
       let query = adminDb
         .from('exams')
-        .select('id, grade, category, order_no, title, indicators, question_count, time_limit_min, random_questions, random_choices, allow_retake, show_review, has_pin, approved, approved_rooms, updated_at')
+        .select('id, grade, category, order_no, title, indicators, question_count, time_limit_min, random_questions, random_choices, allow_retake, max_attempts, show_review, has_pin, approved, approved_rooms, updated_at')
         .eq('approved', true)
         .order('order_no', { ascending: true });
 
@@ -115,24 +122,25 @@ Deno.serve(async (req: Request) => {
         studentRoom ? roomAllowed(ex.approved_rooms, studentRoom) : true
       );
 
-      // ตรวจสอบประวัติการส่งข้อสอบจากรหัส 5 หลัก (หรือชื่อ+ห้อง)
+      // ตรวจสอบจำนวนครั้งที่ทำแล้วและผลล่าสุดจากรหัสนักเรียน 5 หลัก (หรือชื่อ+ห้อง)
       const submittedMap: Record<string, { score: number; max_score: number; percentage: number }> = {};
-      if ((studentCode || studentName) && studentRoom && visibleExams.length > 0) {
+      const attemptCountMap: Record<string, number> = {};
+      if ((studentCode || (studentName && studentRoom)) && visibleExams.length > 0) {
         let sQuery = adminDb
           .from('scores')
           .select('exam_id, score, max_score, percentage')
-          .eq('student_room', studentRoom)
           .in('exam_id', visibleExams.map((e) => e.id))
           .order('submitted_at', { ascending: false });
 
         if (studentCode) {
           sQuery = sQuery.eq('student_code', studentCode);
         } else {
-          sQuery = sQuery.eq('student_name', studentName);
+          sQuery = sQuery.eq('student_name', studentName).eq('student_room', studentRoom);
         }
 
         const { data: scoreRows } = await sQuery;
         for (const row of scoreRows || []) {
+          attemptCountMap[row.exam_id] = (attemptCountMap[row.exam_id] || 0) + 1;
           if (!submittedMap[row.exam_id]) {
             submittedMap[row.exam_id] = {
               score: row.score,
@@ -143,11 +151,21 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      const enriched = visibleExams.map((ex) => ({
-        ...ex,
-        already_submitted: Boolean(submittedMap[ex.id]),
-        previous_result: submittedMap[ex.id] || null,
-      }));
+      const enriched = visibleExams.map((ex) => {
+        const maxAttempts = getEffectiveMaxAttempts(ex);
+        const attemptsUsed = attemptCountMap[ex.id] || 0;
+        const attemptsRemaining = maxAttempts === 0 ? null : Math.max(0, maxAttempts - attemptsUsed);
+        const limitReached = maxAttempts > 0 && attemptsUsed >= maxAttempts;
+        return {
+          ...ex,
+          max_attempts: maxAttempts,
+          attempts_used: attemptsUsed,
+          attempts_remaining: attemptsRemaining,
+          limit_reached: limitReached,
+          already_submitted: attemptsUsed > 0,
+          previous_result: submittedMap[ex.id] || null,
+        };
+      });
 
       return jsonResponse({ success: true, approvedExams: enriched });
     }
@@ -207,19 +225,27 @@ Deno.serve(async (req: Request) => {
         }, 403);
       }
 
-      // ตรวจสอบการส่งซ้ำด้วยรหัสประจำตัว 5 หลักที่ได้จาก mt00000@maetamwit.ac.th
-      if (!exam.allow_retake) {
-        const { data: existingScores } = await adminDb
+      // ตรวจสอบโควตาจำนวนครั้งที่ทำได้ (max_attempts: 1=ครั้งเดียว, N=ทำได้ N ครั้ง, 0=ไม่จำกัด)
+      const maxAttempts = getEffectiveMaxAttempts(exam);
+      if (maxAttempts > 0) {
+        const { data: existingScores, count: attemptsUsed } = await adminDb
           .from('scores')
-          .select('id, score, max_score')
+          .select('id, score, max_score', { count: 'exact' })
           .eq('exam_id', examId)
           .eq('student_code', studentCode)
+          .order('submitted_at', { ascending: false })
           .limit(1);
 
-        if (existingScores && existingScores.length > 0) {
+        const usedCount = Number(attemptsUsed || 0);
+        if (usedCount >= maxAttempts) {
+          const latest = existingScores?.[0];
+          const retakeCap = Math.max(0, maxAttempts - 1);
           return jsonResponse({
             success: false,
-            message: `รหัสนักเรียน ${studentCode} ได้ส่งข้อสอบชุดนี้ไปแล้ว (${existingScores[0].score}/${existingScores[0].max_score}) และไม่อนุญาตให้ทำซ้ำ`,
+            message:
+              maxAttempts === 1
+                ? `รหัสนักเรียน ${studentCode} ส่งข้อสอบชุดนี้ไปแล้ว (${latest ? `${latest.score}/${latest.max_score}` : '1 ครั้ง'}) และไม่อนุญาตให้ทดสอบซ้ำ`
+                : `รหัสนักเรียน ${studentCode} ทดสอบครบจำนวนที่กำหนดแล้ว (${usedCount}/${maxAttempts} ครั้ง • สอบซ้ำได้สูงสุด ${retakeCap} ครั้ง)`,
           }, 403);
         }
       }
@@ -333,9 +359,33 @@ Deno.serve(async (req: Request) => {
 
       const { data: exam } = await adminDb
         .from('exams')
-        .select('id, title, show_review')
+        .select('id, title, show_review, allow_retake, max_attempts')
         .eq('id', session.exam_id)
         .single();
+
+      // ตรวจซ้ำก่อนบันทึกคะแนน ป้องกันกรณีเปิดหลายแท็บเกินโควตาสอบซ้ำ
+      if (exam) {
+        const submitMaxAttempts = getEffectiveMaxAttempts(exam);
+        if (submitMaxAttempts > 0) {
+          const { count: currentSubmits } = await adminDb
+            .from('scores')
+            .select('id', { count: 'exact', head: true })
+            .eq('exam_id', session.exam_id)
+            .eq('student_code', session.student_code);
+
+          const submittedCnt = Number(currentSubmits || 0);
+          if (submittedCnt >= submitMaxAttempts) {
+            await adminDb
+              .from('exam_sessions')
+              .update({ status: 'expired', submitted_at: new Date().toISOString() })
+              .eq('id', session.id);
+            return jsonResponse({
+              success: false,
+              message: `ส่งคำตอบไม่ได้: รหัสนักเรียน ${session.student_code} ทดสอบครบจำนวนสูงสุด ${submitMaxAttempts} ครั้งแล้ว`,
+            }, 403);
+          }
+        }
+      }
 
       const served: ServedQuestion[] = Array.isArray(session.served_questions)
         ? session.served_questions
