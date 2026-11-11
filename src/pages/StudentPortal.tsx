@@ -266,9 +266,9 @@ export default function StudentPortal({ onGoAdmin }: Props) {
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <header className="onet-header">
         <div className="brand-row">
-          <div className="brand-badge">O-NET CBT</div>
+          <div className="brand-badge">ONLINE TEST</div>
           <div>
-            <h1 style={{ fontSize: 18, fontWeight: 700 }}>ระบบทดสอบออนไลน์มาตรฐาน O-NET</h1>
+            <h1 style={{ fontSize: 18, fontWeight: 700 }}>ระบบทดสอบวัดผลการเรียนออนไลน์</h1>
             <p style={{ fontSize: 12, color: '#cbd5e1' }}>
               เทคโนโลยี (ว 4.1 / ว 4.2) โรงเรียนแม่ต๋ำตาดควันวิทยาคม
             </p>
@@ -381,7 +381,7 @@ export default function StudentPortal({ onGoAdmin }: Props) {
               )}
 
               <button className="btn btn-primary" type="submit" style={{ padding: 12, fontSize: 15, marginTop: 4 }}>
-                <LogIn size={17} /> เข้าสู่ห้องสอบ O-NET
+                <LogIn size={17} /> เข้าสู่ระบบทดสอบวัดผลการเรียนออนไลน์
               </button>
             </form>
           </div>
@@ -494,7 +494,7 @@ export default function StudentPortal({ onGoAdmin }: Props) {
                       disabled={lockedDone || loadingLobby}
                       onClick={() => handleClickStart(ex)}
                     >
-                      {lockedDone ? 'ส่งคำตอบเรียบร้อยแล้ว' : ex.has_pin ? '🔐 ใส่ PIN เพื่อเริ่มสอบ' : '▶ เริ่มทำข้อสอบ O-NET'}
+                      {lockedDone ? 'ส่งคำตอบเรียบร้อยแล้ว' : ex.has_pin ? '🔐 ใส่ PIN เพื่อเริ่มสอบ' : '▶ เริ่มทำแบบทดสอบ'}
                     </button>
                   </div>
                 );
@@ -503,7 +503,7 @@ export default function StudentPortal({ onGoAdmin }: Props) {
           </div>
         )}
 
-        {/* VIEW 2: O-NET EXAM ROOM */}
+        {/* VIEW 2: ONLINE EXAM ROOM */}
         {view === 'exam' && currentQ && (
           <div className="exam-workspace">
             <div className="question-panel">
@@ -739,7 +739,7 @@ export default function StudentPortal({ onGoAdmin }: Props) {
       )}
 
       <footer style={{ textAlign: 'center', padding: 14, borderTop: '1px solid var(--border)', background: '#fff', fontSize: 13, color: 'var(--muted)' }}>
-        ระบบสอบ O-NET CBT โรงเรียนแม่ต๋ำตาดควันวิทยาคม •{' '}
+        ระบบทดสอบวัดผลการเรียนออนไลน์ โรงเรียนแม่ต๋ำตาดควันวิทยาคม •{' '}
         <button
           type="button"
           onClick={onGoAdmin}

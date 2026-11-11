@@ -301,7 +301,7 @@ export default function AdminBackend({ onGoStudent }: Props) {
         <div className="brand-row">
           <div className="brand-badge" style={{ background: '#10b981', color: '#fff' }}>BACK-END</div>
           <div>
-            <h1 style={{ fontSize: 18 }}>ระบบหลังบ้านครูผู้สอน — ควบคุมสิทธิ์เปิด-ปิดข้อสอบ O-NET</h1>
+            <h1 style={{ fontSize: 18 }}>ระบบหลังบ้านครูผู้สอน — ระบบทดสอบวัดผลการเรียนออนไลน์</h1>
             <p style={{ fontSize: 12, color: '#cbd5e1' }}>
               {isTeacherAdmin ? `ล็อกอินแล้ว: ${teacherEmail} • เชื่อม Realtime เปิดอยู่` : 'กรุณาเข้าสู่ระบบด้วยบัญชีครูผู้สอนเพื่อจัดการสิทธิ์ข้อสอบ'}
             </p>
