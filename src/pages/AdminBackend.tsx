@@ -187,22 +187,38 @@ export default function AdminBackend({ onGoStudent }: Props) {
     setBusyId('');
   };
 
-  const bulkApproval = async (scope: 'ALL_LOCK' | 'M2_PRE' | 'M2_POST', nextState: boolean) => {
-    const label = scope === 'ALL_LOCK' ? 'ปิดอนุมัติข้อสอบทั้งหมดทันที' : `เปลี่ยนสถานะกลุ่ม ${scope}`;
+  const bulkApproval = async (
+    scope: 'ALL_LOCK' | 'M1_PRE' | 'M1_POST' | 'M2_PRE' | 'M2_POST',
+    nextState: boolean
+  ) => {
+    let label = 'เปลี่ยนสถานะกลุ่ม';
+    if (scope === 'ALL_LOCK') label = 'ปิดอนุมัติข้อสอบทั้งหมดทันที';
+    else if (scope === 'M1_PRE') label = `${nextState ? 'เปิด' : 'ปิด'}อนุมัติ Pre-test ม.1 ทั้ง 10 แผน`;
+    else if (scope === 'M1_POST') label = `${nextState ? 'เปิด' : 'ปิด'}อนุมัติ Post-test ม.1 ทั้ง 10 แผน`;
+    else if (scope === 'M2_PRE') label = `${nextState ? 'เปิด' : 'ปิด'}อนุมัติ Pre-test ม.2 ทั้ง 10 แผน`;
+    else if (scope === 'M2_POST') label = `${nextState ? 'เปิด' : 'ปิด'}อนุมัติ Post-test ม.2 ทั้ง 10 แผน`;
+
     if (!window.confirm(`ยืนยัน ${label}?`)) return;
 
     let targets = exams;
-    if (scope === 'M2_PRE') targets = exams.filter((e) => e.id.startsWith('P') && e.id.endsWith('_PRE'));
-    if (scope === 'M2_POST') targets = exams.filter((e) => e.id.startsWith('P') && e.id.endsWith('_POST'));
+    if (scope === 'ALL_LOCK') targets = exams;
+    else if (scope === 'M1_PRE') targets = exams.filter((e) => e.id.startsWith('M1_P') && e.id.endsWith('_PRE'));
+    else if (scope === 'M1_POST') targets = exams.filter((e) => e.id.startsWith('M1_P') && e.id.endsWith('_POST'));
+    else if (scope === 'M2_PRE') targets = exams.filter((e) => e.id.startsWith('P') && e.id.endsWith('_PRE'));
+    else if (scope === 'M2_POST') targets = exams.filter((e) => e.id.startsWith('P') && e.id.endsWith('_POST'));
 
     const ids = targets.map((t) => t.id);
-    if (ids.length === 0) return;
+    if (ids.length === 0) {
+      alert('ไม่พบข้อสอบในกลุ่มที่ระบุ');
+      return;
+    }
 
     const { error } = await supabase
       .from('exams')
       .update({ approved: nextState, updated_at: new Date().toISOString() })
       .in('id', ids);
     if (error) alert('ดำเนินการไม่สำเร็จ: ' + error.message);
+    else alert(`ดำเนินการ ${label} เรียบร้อยแล้ว (${ids.length} ชุด)`);
     await loadAllAdminData();
   };
 
@@ -267,17 +283,18 @@ export default function AdminBackend({ onGoStudent }: Props) {
   }, [exams, gradeFilter, catFilter]);
 
   const gainRows = useMemo(() => {
-    const map: Record<string, { name: string; room: string; planNo: number; pre: number | null; post: number | null }> = {};
+    const map: Record<string, { grade: string; name: string; room: string; planNo: number; pre: number | null; post: number | null }> = {};
     for (const s of scores) {
-      const m = s.exam_id.match(/^P(\d{2})_(PRE|POST)$/);
+      const m = s.exam_id.match(/^(?:(M[1-3])_)?P(\d{2})_(PRE|POST)$/);
       if (!m) continue;
-      const planNo = parseInt(m[1], 10);
-      const key = `${s.student_name}|${s.student_room}|${planNo}`;
-      if (!map[key]) map[key] = { name: s.student_name, room: s.student_room, planNo, pre: null, post: null };
-      if (m[2] === 'PRE') map[key].pre = s.score;
+      const gradeStr = m[1] ? (m[1] === 'M1' ? 'ม.1' : m[1] === 'M2' ? 'ม.2' : 'ม.3') : (s.grade || 'ม.2');
+      const planNo = parseInt(m[2], 10);
+      const key = `${gradeStr}|${s.student_name}|${s.student_room}|${planNo}`;
+      if (!map[key]) map[key] = { grade: gradeStr, name: s.student_name, room: s.student_room, planNo, pre: null, post: null };
+      if (m[3] === 'PRE') map[key].pre = s.score;
       else map[key].post = s.score;
     }
-    return Object.values(map).sort((a, b) => a.planNo - b.planNo || a.room.localeCompare(b.room));
+    return Object.values(map).sort((a, b) => a.grade.localeCompare(b.grade) || a.planNo - b.planNo || a.room.localeCompare(b.room));
   }, [scores]);
 
   const filteredScores = useMemo(() => {
@@ -433,7 +450,7 @@ WHERE email = '${teacherEmail}';`}
                       <option value="ม.2">เฉพาะ ม.2</option>
                       <option value="ม.1">เฉพาะ ม.1</option>
                       <option value="ม.3">เฉพาะ ม.3</option>
-                      <option value="ALL">ทุกชั้น (54)</option>
+                      <option value="ALL">ทุกชั้น ({exams.length})</option>
                     </select>
                     <select className="input" style={{ width: 190 }} value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
                       <option value="ALL">ทุกประเภทแบบทดสอบ</option>
@@ -445,9 +462,11 @@ WHERE email = '${teacherEmail}';`}
                     </select>
                   </div>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    <button className="btn btn-teal" onClick={() => void bulkApproval('M2_PRE', true)}>🔓 เปิด Pre-test ม.2 ทั้ง 10 แผน</button>
-                    <button className="btn btn-primary" onClick={() => void bulkApproval('M2_POST', true)}>🔓 เปิด Post-test ม.2 ทั้ง 10 แผน</button>
-                    <button className="btn btn-secondary" onClick={() => void loadAllAdminData()}><RefreshCw size={15} /></button>
+                    <button className="btn btn-teal" onClick={() => void bulkApproval('M1_PRE', true)}>🔓 เปิด Pre-test ม.1</button>
+                    <button className="btn btn-primary" onClick={() => void bulkApproval('M1_POST', true)}>🔓 เปิด Post-test ม.1</button>
+                    <button className="btn btn-teal" onClick={() => void bulkApproval('M2_PRE', true)}>🔓 เปิด Pre-test ม.2</button>
+                    <button className="btn btn-primary" onClick={() => void bulkApproval('M2_POST', true)}>🔓 เปิด Post-test ม.2</button>
+                    <button className="btn btn-secondary" onClick={() => void loadAllAdminData()} title="รีเฟรชข้อมูล"><RefreshCw size={15} /></button>
                   </div>
                 </div>
 
@@ -621,15 +640,16 @@ WHERE email = '${teacherEmail}';`}
                     </div>
                   </div>
                   <table className="tbl" style={{ marginBottom: 20 }}>
-                    <thead><tr><th>ชื่อ-สกุล</th><th>ห้อง</th><th>แผนที่</th><th>Pre-test</th><th>Post-test</th><th>Gain</th></tr></thead>
+                    <thead><tr><th>ระดับชั้น</th><th>ชื่อ-สกุล</th><th>ห้อง</th><th>แผนที่</th><th>Pre-test</th><th>Post-test</th><th>Gain</th></tr></thead>
                     <tbody>
                       {gainRows.length === 0 ? (
-                        <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)' }}>ยังไม่มีข้อมูล Pre/Post เปรียบเทียบ</td></tr>
+                        <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)' }}>ยังไม่มีข้อมูล Pre/Post เปรียบเทียบ</td></tr>
                       ) : (
                         gainRows.map((g, i) => {
                           const gain = g.pre !== null && g.post !== null ? g.post - g.pre : null;
                           return (
                             <tr key={i}>
+                              <td><span style={{ background: '#e0f2fe', color: '#0369a1', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 700 }}>{g.grade}</span></td>
                               <td>{g.name}</td>
                               <td>{g.room}</td>
                               <td>แผนที่ {g.planNo}</td>
