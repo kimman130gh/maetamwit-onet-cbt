@@ -41,6 +41,11 @@ export interface ExamResultPayload {
   score: number;
   maxScore: number;
   percentage: number;
+  scoreAction?: 'created' | 'update_higher' | 'keep_existing';
+  bestScore?: number;
+  bestMaxScore?: number;
+  bestPercentage?: number;
+  attemptsUsed?: number;
   breakdown: Record<string, { correct: number; total: number; percentage: number }>;
   showReview: boolean;
   reviewData: {
@@ -66,6 +71,41 @@ export interface ScoreRow {
   percentage: number;
   time_spent_sec: number;
   submitted_at: string;
+  attempt_count?: number;
+}
+
+export interface StudentRosterRow {
+  id: string;
+  student_id: string;
+  title_prefix: string | null;
+  name: string;
+  classroom_id: string | null;
+  grade_level: string | null;
+  seat_number: number | null;
+  status: string | null;
+}
+
+export type StudentGender = 'male' | 'female' | 'other';
+
+export interface ClassReportRow {
+  studentCode: string;
+  gender: StudentGender;
+  genderLabel: string;
+  titlePrefix: string;
+  fullName: string;
+  enteredName: string;
+  room: string;
+  enteredRoom: string;
+  seatNumber: number | null;
+  inRoster: boolean;
+  crossGrade: boolean;
+  status: 'submitted' | 'not_submitted';
+  score: number | null;
+  maxScore: number | null;
+  percentage: number | null;
+  attemptCount: number;
+  timeSpentSec: number | null;
+  submittedAt: string | null;
 }
 
 export interface SessionMonitorRow {

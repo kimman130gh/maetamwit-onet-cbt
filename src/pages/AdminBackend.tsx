@@ -12,7 +12,20 @@ import {
   Unlock,
 } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from '../lib/supabase';
-import type { ExamCatalogRow, ScoreRow, SessionMonitorRow } from '../types';
+import {
+  buildClassScoreReport,
+  buildGainScoreRows,
+  buildReportCsvFilename,
+  buildScoreReportCsv,
+  dedupeBestScores,
+  getRoomsForGrade,
+} from '../lib/scoreReport';
+import type {
+  ExamCatalogRow,
+  ScoreRow,
+  SessionMonitorRow,
+  StudentRosterRow,
+} from '../types';
 
 interface Props {
   onGoStudent: () => void;
@@ -53,10 +66,15 @@ export default function AdminBackend({ onGoStudent }: Props) {
   const [attemptsDraft, setAttemptsDraft] = useState<Record<string, number>>({});
   const [customAttemptsMap, setCustomAttemptsMap] = useState<Record<string, boolean>>({});
   const [scores, setScores] = useState<ScoreRow[]>([]);
+  const [roster, setRoster] = useState<StudentRosterRow[]>([]);
   const [activeSessions, setActiveSessions] = useState<SessionMonitorRow[]>([]);
   const [bankRows, setBankRows] = useState<QuestionBankRow[]>([]);
   const [bankGrade, setBankGrade] = useState('ม.2');
-  const [roomFilter, setRoomFilter] = useState('ALL');
+  const [reportGrade, setReportGrade] = useState<string>('ม.2');
+  const [reportExamId, setReportExamId] = useState<string>('');
+  const [reportRoom, setReportRoom] = useState<string>('ALL');
+  const [includeUnsubmitted, setIncludeUnsubmitted] = useState<boolean>(true);
+  const [groupByRoom, setGroupByRoom] = useState<boolean>(false);
   const [busyId, setBusyId] = useState<string>('');
 
   const verifySession = useCallback(async () => {
@@ -82,17 +100,40 @@ export default function AdminBackend({ onGoStudent }: Props) {
     setAuthChecked(true);
   }, []);
 
+  const fetchAllScores = useCallback(async (): Promise<ScoreRow[]> => {
+    const pageSize = 1000;
+    const all: ScoreRow[] = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('scores')
+        .select('*')
+        .order('submitted_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, from + pageSize - 1);
+      if (error || !data || data.length === 0) break;
+      all.push(...(data as ScoreRow[]));
+      if (data.length < pageSize) break;
+      from += pageSize;
+    }
+    return all;
+  }, []);
+
   const loadAllAdminData = useCallback(async () => {
     if (!isTeacherAdmin) return;
-    const [exRes, secRes, scRes, sessRes] = await Promise.all([
+    const [exRes, secRes, allScores, sessRes, stRes] = await Promise.all([
       supabase.from('exams').select('*').order('order_no', { ascending: true }),
       supabase.from('exam_secrets').select('exam_id, require_pin'),
-      supabase.from('scores').select('*').order('submitted_at', { ascending: false }).limit(500),
+      fetchAllScores(),
       supabase
         .from('exam_sessions')
         .select('id, exam_id, grade, student_code, student_name, student_room, status, started_at')
         .eq('status', 'in_progress')
         .order('started_at', { ascending: false }),
+      supabase
+        .from('students')
+        .select('id, student_id, title_prefix, name, classroom_id, grade_level, seat_number, status')
+        .order('student_id', { ascending: true }),
     ]);
 
     if (exRes.data) {
@@ -114,9 +155,12 @@ export default function AdminBackend({ onGoStudent }: Props) {
       for (const r of secRes.data) pm[r.exam_id] = r.require_pin || '';
       setPinMap(pm);
     }
-    if (scRes.data) setScores(scRes.data as ScoreRow[]);
+    setScores(allScores);
     if (sessRes.data) setActiveSessions(sessRes.data as SessionMonitorRow[]);
-  }, [isTeacherAdmin]);
+    if (!stRes.error && stRes.data) {
+      setRoster(stRes.data as StudentRosterRow[]);
+    }
+  }, [isTeacherAdmin, fetchAllScores]);
 
   const loadQuestionBank = useCallback(async (g: string) => {
     if (!isTeacherAdmin) return;
@@ -282,49 +326,109 @@ export default function AdminBackend({ onGoStudent }: Props) {
     });
   }, [exams, gradeFilter, catFilter]);
 
-  const gainRows = useMemo(() => {
-    const map: Record<string, { grade: string; name: string; room: string; planNo: number; pre: number | null; post: number | null }> = {};
-    for (const s of scores) {
-      const m = s.exam_id.match(/^(?:(M[1-3])_)?P(\d{2})_(PRE|POST)$/);
-      if (!m) continue;
-      const gradeStr = m[1] ? (m[1] === 'M1' ? 'ม.1' : m[1] === 'M2' ? 'ม.2' : 'ม.3') : (s.grade || 'ม.2');
-      const planNo = parseInt(m[2], 10);
-      const key = `${gradeStr}|${s.student_name}|${s.student_room}|${planNo}`;
-      if (!map[key]) map[key] = { grade: gradeStr, name: s.student_name, room: s.student_room, planNo, pre: null, post: null };
-      if (m[3] === 'PRE') map[key].pre = s.score;
-      else map[key].post = s.score;
-    }
-    return Object.values(map).sort((a, b) => a.grade.localeCompare(b.grade) || a.planNo - b.planNo || a.room.localeCompare(b.room));
-  }, [scores]);
+  const dedupedScores = useMemo(() => dedupeBestScores(scores), [scores]);
 
-  const filteredScores = useMemo(() => {
-    return scores.filter((s) => roomFilter === 'ALL' || s.student_room === roomFilter);
-  }, [scores, roomFilter]);
+  const examScoreCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const sc of dedupedScores) {
+      counts[sc.exam_id] = (counts[sc.exam_id] || 0) + 1;
+    }
+    return counts;
+  }, [dedupedScores]);
+
+  const reportExamsForGrade = useMemo(() => {
+    return exams.filter((e) => e.grade === reportGrade);
+  }, [exams, reportGrade]);
+
+  useEffect(() => {
+    if (reportExamsForGrade.length === 0) {
+      setReportExamId('');
+      return;
+    }
+    const stillValid = reportExamsForGrade.some((e) => e.id === reportExamId);
+    if (!stillValid) {
+      const firstWithScores = reportExamsForGrade.find((e) => (examScoreCounts[e.id] || 0) > 0);
+      setReportExamId((firstWithScores || reportExamsForGrade[0]).id);
+    }
+  }, [reportExamsForGrade, reportExamId, examScoreCounts]);
+
+  const reportRooms = useMemo(
+    () => getRoomsForGrade(reportGrade, roster, dedupedScores),
+    [reportGrade, roster, dedupedScores]
+  );
+
+  useEffect(() => {
+    if (reportRoom !== 'ALL' && !reportRooms.includes(reportRoom)) {
+      setReportRoom('ALL');
+    }
+  }, [reportRoom, reportRooms]);
+
+  const selectedReportExam = useMemo(
+    () => exams.find((e) => e.id === reportExamId) || null,
+    [exams, reportExamId]
+  );
+
+  const reportRows = useMemo(
+    () =>
+      buildClassScoreReport({
+        grade: reportGrade,
+        examId: reportExamId,
+        roomFilter: reportRoom,
+        groupByRoom,
+        includeUnsubmitted,
+        roster,
+        scores: dedupedScores,
+      }),
+    [reportGrade, reportExamId, reportRoom, groupByRoom, includeUnsubmitted, roster, dedupedScores]
+  );
+
+  const reportSummary = useMemo(() => {
+    const submitted = reportRows.filter((r) => r.status === 'submitted' && r.score !== null);
+    const maleSubmitted = submitted.filter((r) => r.gender === 'male').length;
+    const femaleSubmitted = submitted.filter((r) => r.gender === 'female').length;
+    const totalScore = submitted.reduce((acc, r) => acc + (r.score || 0), 0);
+    const totalPct = submitted.reduce((acc, r) => acc + (r.percentage || 0), 0);
+    const maxScore = submitted.reduce((m, r) => Math.max(m, r.score || 0), 0);
+    const minScore = submitted.length > 0 ? submitted.reduce((m, r) => Math.min(m, r.score || 0), Number.POSITIVE_INFINITY) : 0;
+    return {
+      totalRows: reportRows.length,
+      submittedCount: submitted.length,
+      notSubmittedCount: reportRows.length - submitted.length,
+      maleSubmitted,
+      femaleSubmitted,
+      avgScore: submitted.length > 0 ? (totalScore / submitted.length).toFixed(2) : '-',
+      avgPct: submitted.length > 0 ? (totalPct / submitted.length).toFixed(1) : '-',
+      maxScore: submitted.length > 0 ? maxScore : '-',
+      minScore: submitted.length > 0 ? minScore : '-',
+      examMaxScore: submitted[0]?.maxScore ?? selectedReportExam?.question_count ?? '-',
+    };
+  }, [reportRows, selectedReportExam]);
+
+  const gainRows = useMemo(
+    () =>
+      buildGainScoreRows({
+        gradeFilter: reportGrade,
+        roomFilter: reportRoom,
+        groupByRoom,
+        roster,
+        scores: dedupedScores,
+      }),
+    [reportGrade, reportRoom, groupByRoom, roster, dedupedScores]
+  );
 
   const exportCsv = () => {
-    const header = ['SubmittedAt', 'Grade', 'Room', 'Code', 'Name', 'ExamID', 'Score', 'MaxScore', 'Percent', 'TimeSec'];
-    const lines = [
-      header.join(','),
-      ...filteredScores.map((r) =>
-        [
-          `"${r.submitted_at}"`,
-          `"${r.grade}"`,
-          `"${r.student_room}"`,
-          `"${r.student_code}"`,
-          `"${r.student_name.replace(/"/g, '""')}"`,
-          `"${r.exam_id}"`,
-          r.score,
-          r.max_score,
-          r.percentage,
-          r.time_spent_sec,
-        ].join(',')
-      ),
-    ];
-    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    if (!reportExamId || reportRows.length === 0) return;
+    const csv = buildScoreReportCsv(reportRows, {
+      examId: selectedReportExam?.id || reportExamId,
+      examTitle: selectedReportExam?.title || reportExamId,
+    });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'onet_cbt_supabase_scores.csv';
+    a.href = url;
+    a.download = buildReportCsvFilename(reportGrade, reportExamId, reportRoom);
     a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   if (!authChecked) {
@@ -423,8 +527,8 @@ WHERE email = '${teacherEmail}';`}
                 </div>
               </div>
               <div className="card" style={{ marginBottom: 0 }}>
-                <div style={{ fontSize: 13, color: 'var(--muted)' }}>ส่งข้อสอบแล้วทั้งหมด</div>
-                <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--blue)' }}>{scores.length} ครั้ง</div>
+                <div style={{ fontSize: 13, color: 'var(--muted)' }}>ผลคะแนนที่บันทึก (คน×ชุด)</div>
+                <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--blue)' }}>{dedupedScores.length} รายการ</div>
               </div>
             </div>
 
@@ -625,63 +729,280 @@ WHERE email = '${teacherEmail}';`}
                 </div>
 
                 <div className="card">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
-                    <h3 style={{ color: 'var(--navy)' }}>📈 สรุปผลพัฒนาการ Pre-test vs Post-test (Gain Score)</h3>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <select className="input" style={{ width: 130 }} value={roomFilter} onChange={(e) => setRoomFilter(e.target.value)}>
-                        <option value="ALL">ทุกห้อง</option>
-                        {['ม.2/1', 'ม.2/2', 'ม.2/3', 'ม.2/4', 'ม.2/5', 'ม.1/1', 'ม.3/1'].map((r) => (
-                          <option key={r} value={r}>{r}</option>
-                        ))}
-                      </select>
-                      <button className="btn btn-success" onClick={exportCsv}>
-                        <Download size={15} /> Export CSV ปพ.5
+                  <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start', marginBottom: 14 }}>
+                    <div>
+                      <h3 style={{ color: 'var(--navy)' }}>📊 รายงานผลคะแนนรายแบบทดสอบ (ทั้งระดับชั้น)</h3>
+                      <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 2 }}>
+                        เรียงลำดับ ชาย → หญิง → รหัสนักเรียน (จับคู่คำนำหน้า/ห้องจากทะเบียนนักเรียน {roster.length > 0 ? `${roster.length} คน` : '—'} • แสดงคะแนนสูงสุดของแต่ละคน)
+                      </p>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <button className="btn btn-secondary" onClick={() => void loadAllAdminData()} title="รีเฟรชข้อมูล">
+                        <RefreshCw size={15} /> รีเฟรช
+                      </button>
+                      <button
+                        className="btn btn-success"
+                        disabled={!reportExamId || reportRows.length === 0}
+                        onClick={exportCsv}
+                      >
+                        <Download size={15} /> Export CSV ({reportRows.length} คน)
                       </button>
                     </div>
                   </div>
-                  <table className="tbl" style={{ marginBottom: 20 }}>
-                    <thead><tr><th>ระดับชั้น</th><th>ชื่อ-สกุล</th><th>ห้อง</th><th>แผนที่</th><th>Pre-test</th><th>Post-test</th><th>Gain</th></tr></thead>
-                    <tbody>
-                      {gainRows.length === 0 ? (
-                        <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)' }}>ยังไม่มีข้อมูล Pre/Post เปรียบเทียบ</td></tr>
-                      ) : (
-                        gainRows.map((g, i) => {
-                          const gain = g.pre !== null && g.post !== null ? g.post - g.pre : null;
+
+                  {/* Report Filters */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10, marginBottom: 12 }}>
+                    <div>
+                      <label style={{ fontSize: 12, fontWeight: 700, color: 'var(--navy)', display: 'block', marginBottom: 4 }}>
+                        1. ระดับชั้น
+                      </label>
+                      <select
+                        className="input"
+                        value={reportGrade}
+                        onChange={(e) => {
+                          setReportGrade(e.target.value);
+                          setReportRoom('ALL');
+                        }}
+                      >
+                        <option value="ม.1">มัธยมศึกษาปีที่ 1 (ม.1)</option>
+                        <option value="ม.2">มัธยมศึกษาปีที่ 2 (ม.2)</option>
+                        <option value="ม.3">มัธยมศึกษาปีที่ 3 (ม.3)</option>
+                      </select>
+                    </div>
+
+                    <div style={{ gridColumn: 'span 2' }}>
+                      <label style={{ fontSize: 12, fontWeight: 700, color: 'var(--navy)', display: 'block', marginBottom: 4 }}>
+                        2. แบบทดสอบ ({reportExamsForGrade.length} ชุดใน {reportGrade})
+                      </label>
+                      <select
+                        className="input"
+                        value={reportExamId}
+                        onChange={(e) => setReportExamId(e.target.value)}
+                      >
+                        {reportExamsForGrade.map((ex) => {
+                          const cnt = examScoreCounts[ex.id] || 0;
                           return (
-                            <tr key={i}>
+                            <option key={ex.id} value={ex.id}>
+                              [{ex.id}] {ex.title} {cnt > 0 ? `• (ส่งแล้ว ${cnt} คน)` : ''}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label style={{ fontSize: 12, fontWeight: 700, color: 'var(--navy)', display: 'block', marginBottom: 4 }}>
+                        3. ห้องเรียน
+                      </label>
+                      <select className="input" value={reportRoom} onChange={(e) => setReportRoom(e.target.value)}>
+                        <option value="ALL">ทุกห้อง (ทั้งระดับชั้น {reportGrade})</option>
+                        {reportRooms.map((r) => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'center', marginBottom: 14, fontSize: 13 }}>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={includeUnsubmitted}
+                        onChange={(e) => setIncludeUnsubmitted(e.target.checked)}
+                      />
+                      แสดงรายชื่อนักเรียนที่ยังไม่สอบด้วย (อ้างอิงทะเบียนนักเรียน)
+                    </label>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={groupByRoom}
+                        onChange={(e) => setGroupByRoom(e.target.checked)}
+                      />
+                      แยกจัดกลุ่มตามห้องเรียนก่อนเรียง ชาย → หญิง → รหัส
+                    </label>
+                  </div>
+
+                  {/* Summary Stats */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 14 }}>
+                    <div style={{ background: '#f8fafc', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>รายชื่อในรายงาน</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--navy)' }}>{reportSummary.totalRows} คน</div>
+                    </div>
+                    <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 12, color: '#166534' }}>ส่งแล้ว (ชาย {reportSummary.maleSubmitted} / หญิง {reportSummary.femaleSubmitted})</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#15803d' }}>{reportSummary.submittedCount} คน</div>
+                    </div>
+                    <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 12, color: '#991b1b' }}>ยังไม่สอบ</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#b91c1c' }}>{reportSummary.notSubmittedCount} คน</div>
+                    </div>
+                    <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 12, color: '#1e40af' }}>ค่าเฉลี่ย (เต็ม {reportSummary.examMaxScore})</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#1d4ed8' }}>
+                        {reportSummary.avgScore} {reportSummary.avgPct !== '-' ? `(${reportSummary.avgPct}%)` : ''}
+                      </div>
+                    </div>
+                    <div style={{ background: '#f8fafc', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>สูงสุด / ต่ำสุด</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--navy)' }}>
+                        {reportSummary.maxScore} / {reportSummary.minScore}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Whole-class Report Table */}
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="tbl">
+                      <thead>
+                        <tr>
+                          <th style={{ width: 52, textAlign: 'center' }}>ลำดับ</th>
+                          <th style={{ width: 95 }}>รหัสนักเรียน</th>
+                          <th style={{ width: 70, textAlign: 'center' }}>เพศ</th>
+                          <th>ชื่อ-นามสกุล</th>
+                          <th style={{ width: 85 }}>ห้อง</th>
+                          <th style={{ width: 60, textAlign: 'center' }}>เลขที่</th>
+                          <th style={{ width: 130 }}>สถานะ</th>
+                          <th style={{ width: 95, textAlign: 'center' }}>คะแนน</th>
+                          <th style={{ width: 80, textAlign: 'center' }}>ร้อยละ</th>
+                          <th style={{ width: 155 }}>วันเวลาที่บันทึก</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reportRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={10} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>
+                              ไม่พบข้อมูลนักเรียนหรือผลคะแนนตามตัวกรองที่เลือก
+                            </td>
+                          </tr>
+                        ) : (
+                          reportRows.map((r, idx) => (
+                            <tr
+                              key={`${r.studentCode}-${idx}`}
+                              style={{ background: r.status === 'not_submitted' ? '#fafafa' : '#ffffff' }}
+                            >
+                              <td style={{ textAlign: 'center', color: 'var(--muted)' }}>{idx + 1}</td>
+                              <td><code>{r.studentCode}</code></td>
+                              <td style={{ textAlign: 'center' }}>
+                                <span
+                                  style={{
+                                    padding: '2px 8px',
+                                    borderRadius: 999,
+                                    fontSize: 12,
+                                    fontWeight: 700,
+                                    background:
+                                      r.gender === 'male'
+                                        ? '#dbeafe'
+                                        : r.gender === 'female'
+                                        ? '#fce7f3'
+                                        : '#e2e8f0',
+                                    color:
+                                      r.gender === 'male'
+                                        ? '#1e40af'
+                                        : r.gender === 'female'
+                                        ? '#9d174d'
+                                        : '#475569',
+                                  }}
+                                >
+                                  {r.genderLabel}
+                                </span>
+                              </td>
+                              <td>
+                                <div style={{ fontWeight: 600 }}>
+                                  {r.fullName}
+                                  {r.crossGrade && (
+                                    <span style={{ marginLeft: 6, fontSize: 11, padding: '1px 6px', borderRadius: 4, background: '#fef3c7', color: '#92400e' }}>
+                                      ข้ามชั้น
+                                    </span>
+                                  )}
+                                  {!r.inRoster && (
+                                    <span style={{ marginLeft: 6, fontSize: 11, padding: '1px 6px', borderRadius: 4, background: '#e2e8f0', color: '#475569' }}>
+                                      นอกทะเบียน
+                                    </span>
+                                  )}
+                                </div>
+                                {r.enteredName && r.enteredName !== r.fullName && (
+                                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                                    ชื่อที่กรอกครั้งแรก: {r.enteredName}
+                                  </div>
+                                )}
+                              </td>
+                              <td>
+                                <div>{r.room || '-'}</div>
+                                {r.enteredRoom && r.room && r.enteredRoom !== r.room && (
+                                  <div style={{ fontSize: 11, color: '#b45309' }}>
+                                    เลือกห้อง: {r.enteredRoom}
+                                  </div>
+                                )}
+                              </td>
+                              <td style={{ textAlign: 'center', color: 'var(--muted)' }}>{r.seatNumber ?? '-'}</td>
+                              <td>
+                                {r.status === 'submitted' ? (
+                                  <span style={{ color: '#15803d', fontWeight: 600, fontSize: 13 }}>
+                                    ✔ ส่งแล้ว{r.attemptCount > 1 ? ` (${r.attemptCount} ครั้ง)` : ''}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: '#94a3b8', fontSize: 13 }}>ยังไม่สอบ</span>
+                                )}
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                {r.score !== null ? <strong>{r.score}/{r.maxScore}</strong> : <span style={{ color: '#cbd5e1' }}>-</span>}
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                {r.percentage !== null ? `${r.percentage}%` : <span style={{ color: '#cbd5e1' }}>-</span>}
+                              </td>
+                              <td style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                {r.submittedAt ? new Date(r.submittedAt).toLocaleString('th-TH') : '-'}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <h3 style={{ color: 'var(--navy)', marginBottom: 10 }}>
+                    📈 สรุปผลพัฒนาการ Pre-test vs Post-test — {reportGrade} {reportRoom === 'ALL' ? '(ทุกห้อง)' : `(${reportRoom})`}
+                  </h3>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="tbl">
+                      <thead>
+                        <tr>
+                          <th>ระดับชั้น</th>
+                          <th>รหัส</th>
+                          <th>เพศ</th>
+                          <th>ชื่อ-สกุล</th>
+                          <th>ห้อง</th>
+                          <th>แผนที่</th>
+                          <th>Pre-test</th>
+                          <th>Post-test</th>
+                          <th>Gain</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {gainRows.length === 0 ? (
+                          <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--muted)' }}>ยังไม่มีข้อมูล Pre/Post เปรียบเทียบในตัวกรองที่เลือก</td></tr>
+                        ) : (
+                          gainRows.map((g, i) => (
+                            <tr key={`${g.grade}-${g.studentCode}-${g.planNo}-${i}`}>
                               <td><span style={{ background: '#e0f2fe', color: '#0369a1', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 700 }}>{g.grade}</span></td>
-                              <td>{g.name}</td>
+                              <td><code>{g.studentCode}</code></td>
+                              <td>{g.genderLabel}</td>
+                              <td>{g.fullName}</td>
                               <td>{g.room}</td>
                               <td>แผนที่ {g.planNo}</td>
                               <td>{g.pre ?? '-'}</td>
                               <td>{g.post ?? '-'}</td>
-                              <td style={{ fontWeight: 700, color: gain && gain > 0 ? 'var(--green)' : 'inherit' }}>
-                                {gain === null ? '-' : `${gain >= 0 ? '+' : ''}${gain}`}
+                              <td style={{ fontWeight: 700, color: g.gain !== null && g.gain > 0 ? 'var(--green)' : g.gain !== null && g.gain < 0 ? 'var(--red)' : 'inherit' }}>
+                                {g.gain === null ? '-' : `${g.gain >= 0 ? '+' : ''}${g.gain}`}
                               </td>
                             </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-
-                  <h3 style={{ color: 'var(--navy)', marginBottom: 10 }}>ประวัติการส่งข้อสอบทั้งหมด ({filteredScores.length})</h3>
-                  <table className="tbl">
-                    <thead><tr><th>วันเวลา</th><th>ห้อง</th><th>รหัส</th><th>ชื่อ-สกุล</th><th>ชุดสอบ</th><th>คะแนน</th><th>ร้อยละ</th></tr></thead>
-                    <tbody>
-                      {filteredScores.map((s) => (
-                        <tr key={s.id}>
-                          <td>{new Date(s.submitted_at).toLocaleString('th-TH')}</td>
-                          <td>{s.student_room}</td>
-                          <td>{s.student_code}</td>
-                          <td>{s.student_name}</td>
-                          <td>{s.exam_id}</td>
-                          <td><strong>{s.score}/{s.max_score}</strong></td>
-                          <td>{s.percentage}%</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </>
             )}

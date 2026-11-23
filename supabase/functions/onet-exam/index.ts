@@ -1,5 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { corsHeaders } from 'jsr:@supabase/supabase-js@2/cors';
+import { decideScoreWrite, type ExistingScoreRecord } from './scoreUpsert.ts';
 
 interface ServedChoiceSlot {
   slot: number;
@@ -122,25 +123,37 @@ Deno.serve(async (req: Request) => {
         studentRoom ? roomAllowed(ex.approved_rooms, studentRoom) : true
       );
 
-      // ตรวจสอบจำนวนครั้งที่ทำแล้วและผลล่าสุดจากรหัสนักเรียน 5 หลัก (หรือชื่อ+ห้อง)
+      // ตรวจสอบจำนวนครั้งที่ทำแล้วจาก exam_sessions และผลคะแนนสูงสุดจาก scores
       const submittedMap: Record<string, { score: number; max_score: number; percentage: number }> = {};
       const attemptCountMap: Record<string, number> = {};
       if ((studentCode || (studentName && studentRoom)) && visibleExams.length > 0) {
+        const visibleIds = visibleExams.map((e) => e.id);
+
+        let sessQuery = adminDb
+          .from('exam_sessions')
+          .select('exam_id')
+          .in('exam_id', visibleIds)
+          .eq('status', 'submitted');
+
         let sQuery = adminDb
           .from('scores')
           .select('exam_id, score, max_score, percentage')
-          .in('exam_id', visibleExams.map((e) => e.id))
-          .order('submitted_at', { ascending: false });
+          .in('exam_id', visibleIds)
+          .order('score', { ascending: false });
 
         if (studentCode) {
+          sessQuery = sessQuery.eq('student_code', studentCode);
           sQuery = sQuery.eq('student_code', studentCode);
         } else {
+          sessQuery = sessQuery.eq('student_name', studentName).eq('student_room', studentRoom);
           sQuery = sQuery.eq('student_name', studentName).eq('student_room', studentRoom);
         }
 
-        const { data: scoreRows } = await sQuery;
-        for (const row of scoreRows || []) {
+        const [{ data: sessRows }, { data: scoreRows }] = await Promise.all([sessQuery, sQuery]);
+        for (const row of sessRows || []) {
           attemptCountMap[row.exam_id] = (attemptCountMap[row.exam_id] || 0) + 1;
+        }
+        for (const row of scoreRows || []) {
           if (!submittedMap[row.exam_id]) {
             submittedMap[row.exam_id] = {
               score: row.score,
@@ -225,19 +238,25 @@ Deno.serve(async (req: Request) => {
         }, 403);
       }
 
-      // ตรวจสอบโควตาจำนวนครั้งที่ทำได้ (max_attempts: 1=ครั้งเดียว, N=ทำได้ N ครั้ง, 0=ไม่จำกัด)
+      // ตรวจสอบโควตาจำนวนครั้งที่ทำได้จาก exam_sessions (max_attempts: 1=ครั้งเดียว, N=ทำได้ N ครั้ง, 0=ไม่จำกัด)
       const maxAttempts = getEffectiveMaxAttempts(exam);
       if (maxAttempts > 0) {
-        const { data: existingScores, count: attemptsUsed } = await adminDb
-          .from('scores')
-          .select('id, score, max_score', { count: 'exact' })
+        const { count: attemptsUsed } = await adminDb
+          .from('exam_sessions')
+          .select('id', { count: 'exact', head: true })
           .eq('exam_id', examId)
           .eq('student_code', studentCode)
-          .order('submitted_at', { ascending: false })
-          .limit(1);
+          .eq('status', 'submitted');
 
         const usedCount = Number(attemptsUsed || 0);
         if (usedCount >= maxAttempts) {
+          const { data: existingScores } = await adminDb
+            .from('scores')
+            .select('score, max_score')
+            .eq('exam_id', examId)
+            .eq('student_code', studentCode)
+            .order('score', { ascending: false })
+            .limit(1);
           const latest = existingScores?.[0];
           const retakeCap = Math.max(0, maxAttempts - 1);
           return jsonResponse({
@@ -363,15 +382,16 @@ Deno.serve(async (req: Request) => {
         .eq('id', session.exam_id)
         .single();
 
-      // ตรวจซ้ำก่อนบันทึกคะแนน ป้องกันกรณีเปิดหลายแท็บเกินโควตาสอบซ้ำ
+      // ตรวจซ้ำก่อนบันทึกคะแนนจาก exam_sessions ป้องกันกรณีเปิดหลายแท็บเกินโควตาสอบซ้ำ
       if (exam) {
         const submitMaxAttempts = getEffectiveMaxAttempts(exam);
         if (submitMaxAttempts > 0) {
           const { count: currentSubmits } = await adminDb
-            .from('scores')
+            .from('exam_sessions')
             .select('id', { count: 'exact', head: true })
             .eq('exam_id', session.exam_id)
-            .eq('student_code', session.student_code);
+            .eq('student_code', session.student_code)
+            .eq('status', 'submitted');
 
           const submittedCnt = Number(currentSubmits || 0);
           if (submittedCnt >= submitMaxAttempts) {
@@ -447,28 +467,74 @@ Deno.serve(async (req: Request) => {
 
       const percentage = maxScore > 0 ? Number(((score / maxScore) * 100).toFixed(2)) : 0;
 
+      const nowIso = new Date().toISOString();
       await adminDb
         .from('exam_sessions')
-        .update({ status: 'submitted', submitted_at: new Date().toISOString() })
+        .update({ status: 'submitted', submitted_at: nowIso })
         .eq('id', session.id);
 
-      const { error: insErr } = await adminDb.from('scores').insert({
-        session_id: session.id,
-        exam_id: session.exam_id,
+      const [{ count: totalSubmittedCount }, { data: existingScoreRows, error: fetchScoreErr }] = await Promise.all([
+        adminDb
+          .from('exam_sessions')
+          .select('id', { count: 'exact', head: true })
+          .eq('exam_id', session.exam_id)
+          .eq('student_code', session.student_code)
+          .eq('status', 'submitted'),
+        adminDb
+          .from('scores')
+          .select('id, session_id, student_name, student_room, grade, score, max_score, percentage, submitted_at')
+          .eq('exam_id', session.exam_id)
+          .eq('student_code', session.student_code),
+      ]);
+
+      if (fetchScoreErr) {
+        return jsonResponse({ success: false, message: 'ตรวจสอบประวัติคะแนนเดิมผิดพลาด: ' + fetchScoreErr.message }, 500);
+      }
+
+      const attemptsUsed = Math.max(1, Number(totalSubmittedCount || 0));
+      const decision = decideScoreWrite((existingScoreRows || []) as ExistingScoreRecord[], {
+        sessionId: session.id,
         grade: session.grade,
-        student_code: session.student_code,
-        student_name: session.student_name,
-        student_room: session.student_room,
+        studentName: session.student_name,
+        studentRoom: session.student_room,
         score,
-        max_score: maxScore,
+        maxScore,
         percentage,
-        time_spent_sec: timeSpentSec,
-        indicator_breakdown: breakdown,
-        answers_json: answers,
+        timeSpentSec,
+        indicatorBreakdown: breakdown,
+        answersJson: answers,
+        attemptCount: attemptsUsed,
+        submittedAt: nowIso,
       });
 
-      if (insErr) {
-        return jsonResponse({ success: false, message: 'บันทึกผลคะแนนผิดพลาด: ' + insErr.message }, 500);
+      if (decision.kind !== 'insert' && decision.dedupeIds.length > 0) {
+        const { error: dedupeErr } = await adminDb
+          .from('scores')
+          .delete()
+          .in('id', decision.dedupeIds);
+        if (dedupeErr) {
+          return jsonResponse({ success: false, message: 'จัดระเบียบคะแนนซ้ำไม่สำเร็จ: ' + dedupeErr.message }, 500);
+        }
+      }
+
+      let writeErr: { message: string } | null = null;
+      if (decision.kind === 'insert') {
+        const { error } = await adminDb.from('scores').insert({
+          exam_id: session.exam_id,
+          student_code: session.student_code,
+          ...decision.record,
+        });
+        writeErr = error;
+      } else {
+        const { error } = await adminDb
+          .from('scores')
+          .update(decision.patch)
+          .eq('id', decision.targetId);
+        writeErr = error;
+      }
+
+      if (writeErr) {
+        return jsonResponse({ success: false, message: 'บันทึกผลคะแนนผิดพลาด: ' + writeErr.message }, 500);
       }
 
       return jsonResponse({
@@ -478,6 +544,11 @@ Deno.serve(async (req: Request) => {
         score,
         maxScore,
         percentage,
+        scoreAction: decision.kind === 'insert' ? 'created' : decision.kind,
+        bestScore: decision.bestScore,
+        bestMaxScore: decision.bestMaxScore,
+        bestPercentage: decision.bestPercentage,
+        attemptsUsed,
         breakdown,
         showReview: Boolean(exam?.show_review),
         reviewData,

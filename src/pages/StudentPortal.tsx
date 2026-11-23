@@ -499,7 +499,7 @@ export default function StudentPortal({ onGoAdmin }: Props) {
                       {ex.previous_result && (
                         <div style={{ marginTop: 8, padding: '6px 10px', background: '#f0fdf4', color: '#166534', borderRadius: 8, fontSize: 13, fontWeight: 600 }}>
                           <CheckCircle2 size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                          ผลล่าสุด: {ex.previous_result.score}/{ex.previous_result.max_score} ({ex.previous_result.percentage}%)
+                          คะแนนสูงสุดที่บันทึก: {ex.previous_result.score}/{ex.previous_result.max_score} ({ex.previous_result.percentage}%)
                         </div>
                       )}
                     </div>
@@ -654,7 +654,11 @@ export default function StudentPortal({ onGoAdmin }: Props) {
               <div style={{ fontSize: 20 }}>คิดเป็นร้อยละ {resultData.percentage}%</div>
               <p style={{ marginTop: 8, color: '#e0f2fe' }}>
                 <ShieldCheck size={16} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                บันทึกผลคะแนนรหัสนักเรียน {studentCode} เรียบร้อยแล้ว
+                {resultData.scoreAction === 'keep_existing'
+                  ? `คะแนนรอบนี้ไม่สูงกว่าเดิม ระบบจึงคงคะแนนสูงสุดเดิมของรหัสนักเรียน ${studentCode} ไว้ที่ ${resultData.bestScore}/${resultData.bestMaxScore} (${resultData.bestPercentage}%)`
+                  : resultData.scoreAction === 'update_higher'
+                  ? `ทำคะแนนได้สูงขึ้น! อัปเดตคะแนนสูงสุดรหัสนักเรียน ${studentCode} เรียบร้อยแล้ว`
+                  : `บันทึกผลคะแนนรหัสนักเรียน ${studentCode} เรียบร้อยแล้ว`}
               </p>
             </div>
 
