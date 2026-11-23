@@ -1,10 +1,35 @@
+import { registerHooks } from 'node:module';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  decideScoreWrite,
-  type ExistingScoreRecord,
-  type IncomingScoreInput,
-} from '../supabase/functions/onet-exam/scoreUpsert.ts';
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === 'npm:@supabase/supabase-js@2' || specifier === 'jsr:@supabase/supabase-js@2/cors') {
+      return { shortCircuit: true, url: `stub://${specifier}` };
+    }
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    if (url === 'stub://npm:@supabase/supabase-js@2') {
+      return {
+        shortCircuit: true,
+        format: 'module',
+        source: 'export function createClient() { return {}; }',
+      };
+    }
+    if (url === 'stub://jsr:@supabase/supabase-js@2/cors') {
+      return {
+        shortCircuit: true,
+        format: 'module',
+        source: 'export const corsHeaders = {};',
+      };
+    }
+    return nextLoad(url, context);
+  },
+});
+
+const { decideScoreWrite } = await import('../supabase/functions/onet-exam/index.ts');
+import type { ExistingScoreRecord, IncomingScoreInput } from '../supabase/functions/onet-exam/index.ts';
 
 function makeIncoming(overrides: Partial<IncomingScoreInput> = {}): IncomingScoreInput {
   return {
